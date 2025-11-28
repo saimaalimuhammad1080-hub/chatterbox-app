@@ -2,85 +2,157 @@ import streamlit as st
 from gradio_client import Client, handle_file
 import tempfile
 import os
+import wave
 
-# 1. App Title and Description
-st.set_page_config(page_title="Chatterbox TTS", page_icon="🗣️")
-st.title("🗣️ Free Chatterbox Text-to-Speech")
-st.write("This app uses the ResembleAI/Chatterbox model to generate audio.")
+# --- CONFIGURATION & STYLE ---
+st.set_page_config(page_title="AI Voice Studio", page_icon="🎙️", layout="centered")
 
-# 2. Input Widgets (The User Interface)
-st.subheader("1. Enter Text")
+# Custom CSS to make it look clean (ElevenLabs style)
+st.markdown("""
+<style>
+    .stTextArea textarea {
+        font-size: 18px !important;
+        line-height: 1.5;
+        border-radius: 10px;
+        border: 1px solid #ddd;
+    }
+    .stButton button {
+        width: 100%;
+        border-radius: 25px;
+        height: 50px;
+        font-weight: bold;
+        background-color: #000000;
+        color: white;
+    }
+    .stButton button:hover {
+        background-color: #333333;
+        color: white;
+    }
+    /* Hide the top colored bar */
+    header {visibility: hidden;}
+    footer {visibility: hidden;}
+</style>
+""", unsafe_allow_html=True)
+
+# --- FUNCTIONS ---
+
+def split_text_into_chunks(text, max_chars=250):
+    """Splits long text into safe chunks for the API"""
+    sentences = text.replace('\n', ' ').split('. ')
+    chunks = []
+    current_chunk = ""
+    
+    for sentence in sentences:
+        if len(current_chunk) + len(sentence) < max_chars:
+            current_chunk += sentence + ". "
+        else:
+            chunks.append(current_chunk.strip())
+            current_chunk = sentence + ". "
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+    return chunks
+
+def merge_wav_files(file_list, output_filename):
+    """Merges multiple WAV files into one"""
+    with wave.open(output_filename, 'wb') as wav_out:
+        for i, wav_path in enumerate(file_list):
+            with wave.open(wav_path, 'rb') as wav_in:
+                if i == 0:
+                    wav_out.setparams(wav_in.getparams())
+                wav_out.writeframes(wav_in.readframes(wav_in.getnframes()))
+
+# --- UI LAYOUT ---
+
+st.title("🎙️ AI Voice Studio")
+
+# 1. Main Input Area
 text_input = st.text_area(
-    "Text to synthesize", 
-    value="Now let's make my mum's favourite. So three mars bars into the pan. Then we add the tuna and just stir for a bit."
+    "Script", 
+    height=300, 
+    placeholder="Type or paste your text here (up to 20,000 characters)...",
+    label_visibility="collapsed"
 )
 
-st.subheader("2. Reference Audio (Voice Clone)")
-st.info("Upload a short audio clip (WAV/MP3) to clone the voice. If you don't upload one, a default voice is used.")
-uploaded_file = st.file_uploader("Upload Audio Reference", type=['wav', 'mp3'])
+# Character counter
+char_count = len(text_input)
+st.caption(f"{char_count} / 20,000 characters")
 
-st.subheader("3. Settings")
-col1, col2 = st.columns(2)
+# 2. Hidden Settings (Accordion style to keep it clean)
+with st.expander("⚙️ Voice Settings & Reference Audio"):
+    col1, col2 = st.columns(2)
+    with col1:
+        uploaded_file = st.file_uploader("Clone Voice (Optional)", type=['wav', 'mp3'])
+    with col2:
+        exaggeration = st.slider("Stability/Exaggeration", 0.0, 1.0, 0.5)
+        temperature = st.slider("Clarity/Temperature", 0.0, 1.0, 0.8)
 
-with col1:
-    exaggeration = st.slider("Exaggeration", min_value=0.0, max_value=1.0, value=0.5, help="Neutral = 0.5")
-    temperature = st.slider("Temperature", min_value=0.0, max_value=1.0, value=0.8)
-    
-with col2:
-    cfgw = st.slider("CFG/Pace", min_value=0.0, max_value=1.0, value=0.5)
-    seed = st.number_input("Random Seed (0 = Random)", value=0, step=1)
-
-vad_trim = st.checkbox("Trim Silence (VAD)", value=False)
-
-# 3. The Logic (Sending data to the API)
-if st.button("Generate Audio", type="primary"):
+# 3. Generation Logic
+if st.button("Generate Speech"):
     if not text_input:
-        st.error("Please enter some text.")
+        st.warning("Please enter some text first.")
     else:
-        status_text = st.empty()
-        status_text.text("Connecting to AI model... please wait...")
+        # Create a progress bar
+        progress_bar = st.progress(0, text="Initializing...")
         
         try:
-            # Initialize the client
             client = Client("ResembleAI/Chatterbox")
             
-            # Handle the audio file
-            # If user uploaded a file, we must save it temporarily so Gradio can read it
+            # Prepare chunks
+            chunks = split_text_into_chunks(text_input)
+            total_chunks = len(chunks)
+            temp_files = []
+            
+            # Prepare Voice Reference
+            audio_input = None
             if uploaded_file is not None:
-                # Create a temporary file
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
-                    tmp_file.write(uploaded_file.getvalue())
-                    audio_path = tmp_file.name
-                
-                # prepare the file for the API
-                audio_input = handle_file(audio_path)
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_ref:
+                    tmp_ref.write(uploaded_file.getvalue())
+                    audio_input = handle_file(tmp_ref.name)
             else:
-                # Use the default sample if no file provided
                 audio_input = handle_file('https://github.com/gradio-app/gradio/raw/main/test/test_files/audio_sample.wav')
 
-            status_text.text("Generating audio... (This might take 10-20 seconds)")
+            # Loop through chunks
+            for index, chunk in enumerate(chunks):
+                if not chunk.strip(): 
+                    continue
+                    
+                progress_bar.progress((index / total_chunks), text=f"Converting part {index+1} of {total_chunks}...")
+                
+                result_path = client.predict(
+                    text_input=chunk,
+                    audio_prompt_path_input=audio_input,
+                    exaggeration_input=exaggeration,
+                    temperature_input=temperature,
+                    seed_num_input=0,
+                    cfgw_input=0.5,
+                    vad_trim_input=True,
+                    api_name="/generate_tts_audio"
+                )
+                temp_files.append(result_path)
 
-            # Call the API exactly as documented
-            result_path = client.predict(
-                text_input=text_input,
-                audio_prompt_path_input=audio_input,
-                exaggeration_input=exaggeration,
-                temperature_input=temperature,
-                seed_num_input=seed,
-                cfgw_input=cfgw,
-                vad_trim_input=vad_trim,
-                api_name="/generate_tts_audio"
-            )
+            # Merge files
+            progress_bar.progress(0.9, text="Stitching audio together...")
             
-            # Display the result
-            status_text.text("Done!")
-            st.success("Audio Generated successfully!")
-            st.audio(result_path)
+            final_output = tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name
+            merge_wav_files(temp_files, final_output)
             
-            # Cleanup temp file if it exists
-            if uploaded_file is not None and os.path.exists(audio_path):
-                os.remove(audio_path)
+            progress_bar.empty() # Remove progress bar
+            
+            # --- SUCCESS UI ---
+            st.success("Generation Complete!")
+            
+            # Audio Player
+            st.audio(final_output)
+            
+            # Download Button (Standard Streamlit button, styled by CSS above)
+            with open(final_output, "rb") as file:
+                btn = st.download_button(
+                    label="⬇️ Download Audio (WAV)",
+                    data=file,
+                    file_name="generated_speech.wav",
+                    mime="audio/wav"
+                )
 
         except Exception as e:
-            st.error(f"An error occurred: {e}")
-            status_text.empty()
+            st.error(f"Error: {str(e)}")
+            st.info("Note: If the text is extremely long, the free API might time out.")
